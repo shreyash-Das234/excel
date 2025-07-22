@@ -1,12 +1,13 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import pandas as pd
+import os
 from PIL import Image, ImageTk
-import threading
-import openpyxl
-import webbrowser
 from io import BytesIO
 import base64
+
+DEFAULT_LOGO_B64 = """R0lGODlhMAAwAIAAAP///wAAACH5BAEAAAAALAAAAAAwADAAAAIOhI+py+0Po5y02ouz3rwFADs="""
+
 
 class ExcelToolApp:
     def __init__(self, root):
@@ -14,630 +15,827 @@ class ExcelToolApp:
         self.root.title("ABG-Excel")
         self.root.geometry("1400x900")
         self.root.configure(bg="#232946")
-        self.files = []
-        self.dfs = []
-        self.sheet_names = []
-        self.selected_columns = []
-        self.result_df = None
-        self.current_preview_df = None
 
-        # App icon/logo
-        try:
-            logo_img = Image.open("logo.png").resize((48, 48))
-            self.logo = ImageTk.PhotoImage(logo_img)
-            self.root.iconphoto(False, self.logo)
-        except Exception:
-            # Use a default logo if custom logo not found
-            try:
-                logo_data = base64.b64decode("""R0lGODlhMAAwAIAAAP///wAAACH5BAEAAAAALAAAAAAwADAAAAIOhI+py+0Po5y02ouz3rwFADs=""")
-                logo_img = Image.open(BytesIO(logo_data)).resize((48, 48))
-                self.logo = ImageTk.PhotoImage(logo_img)
-                self.root.iconphoto(False, self.logo)
-            except Exception:
-                self.logo = None
+        # ---------- State ----------
+        self.files = []                   # [full_path, ...]
+        self.all_sheets = {}              # {full_path: {sheet_name: DataFrame}}
+        self.result_df = None             # last operation result
+        self.current_preview_df = None    # what's shown in preview
+        self.current_preview_file = None  # file path of previewed sheet (if sheet-based)
+        self.current_preview_sheet = None # sheet name
 
-        # Style
-        self.set_style()
-
-        # Menu bar
-        self.create_menu()
-
-        # UI Elements
-        self.create_widgets()
+        # ---------- UI setup ----------
+        self._load_logo()
+        self._set_style()
+        self._create_menu()
+        self._create_widgets()
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
-        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w", style="Status.TLabel")
+        self.status_bar = ttk.Label(
+            self.root, textvariable=self.status_var, anchor="w", style="Status.TLabel"
+        )
         self.status_bar.pack(side=tk.BOTTOM, fill="x")
 
-    def set_style(self):
+    def _load_logo(self):
+        try:
+            img = Image.open("logo.png").resize((48, 48))
+        except Exception:
+            try:
+                raw = base64.b64decode(DEFAULT_LOGO_B64)
+                img = Image.open(BytesIO(raw)).resize((48, 48))
+            except Exception:
+                self.logo = None
+                return
+        self.logo = ImageTk.PhotoImage(img)
+        self.root.iconphoto(False, self.logo)
+
+    def _set_style(self):
         style = ttk.Style()
         style.theme_use("clam")
+        style.configure("TFrame", background="#232946")
         style.configure("TLabel", background="#232946", foreground="#fffffe", font=("Segoe UI", 12))
         style.configure("TButton",
-                      background="#eebbc3",
-                      foreground="#232946",
-                      font=("Segoe UI", 12, "bold"),
-                      padding=10,
-                      borderwidth=0,
-                      relief="flat")
-        style.map("TButton",
-                background=[("active", "#b8c1ec"), ("pressed", "#b8c1ec")],
-                relief=[("pressed", "flat"), ("!pressed", "flat")])
-        style.configure("TFrame", background="#232946")
+                        background="#eebbc3",
+                        foreground="#232946",
+                        font=("Segoe UI", 12, "bold"),
+                        padding=6)
+        style.map("TButton", background=[("active", "#b8c1ec")])
         style.configure("TLabelframe", background="#232946", foreground="#eebbc3", font=("Segoe UI", 13, "bold"))
         style.configure("TLabelframe.Label", background="#232946", foreground="#eebbc3", font=("Segoe UI", 13, "bold"))
-        style.configure("Treeview", background="#ffffff", foreground="#232946", fieldbackground="#ffffff", 
-                       font=("Arial", 10), borderwidth=0, rowheight=25)
-        style.configure("Treeview.Heading", background="#eebbc3", foreground="#232946", 
-                       font=("Segoe UI", 11, "bold"), padding=(10,5))
-        style.map("Treeview", background=[("selected", "#b8c1ec")], foreground=[("selected", "#232946")])
         style.configure("Status.TLabel", background="#121629", foreground="#eebbc3", font=("Segoe UI", 10, "italic"))
-        style.configure("Preview.TFrame", background="#ffffff", borderwidth=1, relief="solid")
-        style.configure("Preview.TLabel", background="#ffffff", foreground="#232946", font=("Arial", 10))
+        style.configure("Treeview", background="#ffffff", foreground="#232946", fieldbackground="#ffffff", rowheight=24)
+        style.configure("Treeview.Heading", background="#eebbc3", foreground="#232946", font=("Segoe UI", 11, "bold"))
 
-    def create_menu(self):
+
+    def _create_menu(self):
         menubar = tk.Menu(self.root)
-        
-        # File menu
+
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Open Excel Files...", command=self.load_files)
         file_menu.add_command(label="Export Result...", command=self.export_result)
-        file_menu.add_command(label="Download as Excel", command=self.download_result)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
-        
-        # View menu
+
         view_menu = tk.Menu(menubar, tearoff=0)
-        view_menu.add_command(label="Full Preview", command=lambda: self.show_full_preview())
+        view_menu.add_command(label="Full Preview", command=self.full_preview)
         menubar.add_cascade(label="View", menu=view_menu)
-        
-        # Help menu
+
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="Documentation", command=self.show_docs)
-        help_menu.add_command(label="About", command=self.show_about)
+        help_menu.add_command(label="About", command=self._show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
 
-    def show_about(self):
-        about_text = """Excel Multi-Sheet Comparator & VLOOKUP Tool
-Version 2.0
-© 2025 ABG Analytics
+    def _show_about(self):
+        messagebox.showinfo(
+            "About",
+            "ABG-Excel v4.0\n\n"
+            "Load multiple Excel files; preview sheets; VLOOKUP & compare with unique differences; "
+            "concatenate columns; find unique values; export results."
+        )
 
-Features:
-- Multiple Excel file comparison
-- Sheet concatenation
-- VLOOKUP functionality
-- Google Sheets-like preview
-- Direct download options"""
-        messagebox.showinfo("About", about_text)
+    def _create_widgets(self):
 
-    def show_docs(self):
-        docs_url = "https://docs.example.com/excel-tool"
+        file_frame = ttk.Labelframe(self.root, text="Step 1: Load Excel Files", padding=10)
+        file_frame.pack(fill="x", padx=15, pady=(15, 5))
+
+        ttk.Button(file_frame, text="Add Files", command=self.load_files).pack(side="left", padx=5)
+        ttk.Button(file_frame, text="Clear All", command=self.clear_files).pack(side="left", padx=5)
+
+        self.file_listbox = tk.Listbox(
+            file_frame, height=4, bg="#232946", fg="#eebbc3",
+            selectbackground="#b8c1ec", selectforeground="#232946",
+            font=("Segoe UI", 11), highlightthickness=0
+        )
+        self.file_listbox.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        f_scroll = ttk.Scrollbar(file_frame, orient="vertical", command=self.file_listbox.yview)
+        f_scroll.pack(side="right", fill="y")
+        self.file_listbox.config(yscrollcommand=f_scroll.set)
+
+
+        sel_frame = ttk.Labelframe(self.root, text="Step 2: Select Sheet to Preview", padding=10)
+        sel_frame.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(sel_frame, text="File:").pack(side="left")
+        self.preview_file_combo = ttk.Combobox(sel_frame, state="readonly", width=40)
+        self.preview_file_combo.pack(side="left", padx=5)
+
+        ttk.Label(sel_frame, text="Sheet:").pack(side="left")
+        self.preview_sheet_combo = ttk.Combobox(sel_frame, state="readonly", width=30)
+        self.preview_sheet_combo.pack(side="left", padx=5)
+
+        ttk.Button(sel_frame, text="Load Sheet", command=self._preview_selected_sheet).pack(side="left", padx=10)
+
+        self.preview_file_combo.bind("<<ComboboxSelected>>", self._update_preview_sheet_combo)
+
+
+        op_frame = ttk.Labelframe(self.root, text="Step 3: Operations", padding=10)
+        op_frame.pack(fill="x", padx=15, pady=5)
+
+        ttk.Button(op_frame, text="VLOOKUP & Compare", command=self.vlookup).pack(side="left", padx=5)
+        ttk.Button(op_frame, text="Compare Columns", command=self.compare_columns).pack(side="left", padx=5)
+        ttk.Button(op_frame, text="Concatenate Columns", command=self.concat_columns).pack(side="left", padx=5)
+        ttk.Button(op_frame, text="Find Unique Values", command=self.find_unique_values).pack(side="left", padx=5)
+        ttk.Button(op_frame, text="Export Result", command=self.export_result).pack(side="right", padx=5)
+
+
+        preview_frame = ttk.Labelframe(self.root, text="Step 4: Preview (first 100 rows)", padding=10)
+        preview_frame.pack(fill="both", expand=True, padx=15, pady=(5, 15))
+
+        self.preview_container = ttk.Frame(preview_frame)
+        self.preview_container.pack(fill="both", expand=True)
+
+        self._build_preview_tree()
+
+
+    def load_files(self):
+        paths = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls *.xlsm")])
+        if not paths:
+            return
+
+        new_files = 0
+        for p in paths:
+            if p in self.files:
+                continue
+            try:
+                xl = pd.ExcelFile(p)
+                sheets_dict = {}
+                for s in xl.sheet_names:
+                    sheets_dict[s] = xl.parse(s)
+                self.all_sheets[p] = sheets_dict
+                self.files.append(p)
+                new_files += 1
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to read {os.path.basename(p)}:\n{e}")
+
+      
+        self._refresh_file_list()
+        self._refresh_preview_file_combo()
+
+        if self.files and not self.current_preview_df:
+       
+            first_fp = self.files[0]
+            first_sh = next(iter(self.all_sheets[first_fp]))
+            self._set_current_preview(first_fp, first_sh)
+
+        self.set_status(f"Loaded {new_files} new file(s). Total: {len(self.files)}.")
+
+    def clear_files(self):
+        self.files.clear()
+        self.all_sheets.clear()
+        self.result_df = None
+        self.current_preview_df = None
+        self.current_preview_file = None
+        self.current_preview_sheet = None
+        self._refresh_file_list()
+        self._refresh_preview_file_combo()
+        self._update_preview_tree(pd.DataFrame())
+        self.set_status("Cleared all files.")
+
+    def _refresh_file_list(self):
+        self.file_listbox.delete(0, tk.END)
+        for p in self.files:
+            self.file_listbox.insert(tk.END, os.path.basename(p))
+
+    def _refresh_preview_file_combo(self):
+        self.preview_file_combo['values'] = [os.path.basename(p) for p in self.files]
+        if self.files:
+            self.preview_file_combo.current(0)
+            self._update_preview_sheet_combo()
+
+    def _update_preview_sheet_combo(self, event=None):
+        if not self.files:
+            self.preview_sheet_combo['values'] = []
+            return
+        idx = self.preview_file_combo.current()
+        fp = self.files[idx]
+        sheets = list(self.all_sheets[fp].keys())
+        self.preview_sheet_combo['values'] = sheets
+        if sheets:
+            self.preview_sheet_combo.current(0)
+
+    def _preview_selected_sheet(self):
+        if not self.files:
+            return
+        fp = self.files[self.preview_file_combo.current()]
+        sh = self.preview_sheet_combo.get()
+        self._set_current_preview(fp, sh)
+
+    def _set_current_preview(self, file_path, sheet_name):
+        df = self.all_sheets[file_path][sheet_name]
+        self.current_preview_df = df
+        self.current_preview_file = file_path
+        self.current_preview_sheet = sheet_name
+        self.result_df = df.copy()  # treat current as baseline result
+        self._update_preview_tree(df)
+        self.set_status(f"Previewing: {os.path.basename(file_path)} / {sheet_name}")
+
+
+    def _build_preview_tree(self):
+        # remove existing if any
+        for w in self.preview_container.winfo_children():
+            w.destroy()
+
+        self.preview_tree = ttk.Treeview(self.preview_container, show="headings")
+        self.preview_tree.pack(fill="both", expand=True)
+
+        vsb = ttk.Scrollbar(self.preview_container, orient="vertical", command=self.preview_tree.yview)
+        vsb.pack(side="right", fill="y")
+        self.preview_tree.configure(yscrollcommand=vsb.set)
+
+        hsb = ttk.Scrollbar(self.preview_container, orient="horizontal", command=self.preview_tree.xview)
+        hsb.pack(side="bottom", fill="x")
+        self.preview_tree.configure(xscrollcommand=hsb.set)
+
+        self._update_preview_tree(pd.DataFrame())
+
+    def _update_preview_tree(self, df):
+        self.preview_tree.delete(*self.preview_tree.get_children())
+
+        for c in self.preview_tree["columns"]:
+            self.preview_tree.heading(c, text="")
+        if df is None or df.empty:
+            self.preview_tree["columns"] = []
+            return
+        cols = list(df.columns)
+        self.preview_tree["columns"] = cols
+        for c in cols:
+            self.preview_tree.heading(c, text=c)
+            self.preview_tree.column(c, width=120, anchor="w")
+        for _, row in df.head(100).iterrows():  # limit preview
+            self.preview_tree.insert("", "end", values=list(row))
+
+    def vlookup(self):
+        if len(self.files) < 2:
+            messagebox.showwarning("Warning", "Load at least two files.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("VLOOKUP & Compare")
+        dlg.geometry("600x520")
+        dlg.configure(bg="#232946")
+
+        file_names = [os.path.basename(p) for p in self.files]
+
+
+        ttk.Label(dlg, text="Main File:", style="TLabel").pack(pady=(10, 0))
+        main_file_combo = ttk.Combobox(dlg, values=file_names, state="readonly")
+        main_file_combo.pack(fill="x", padx=15, pady=5)
+        if self.current_preview_file:
+            main_file_combo.current(self.files.index(self.current_preview_file))
+        else:
+            main_file_combo.current(0)
+
+        ttk.Label(dlg, text="Main Sheet:", style="TLabel").pack(pady=(5, 0))
+        main_sheet_combo = ttk.Combobox(dlg, state="readonly")
+        main_sheet_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Key Column (Main):", style="TLabel").pack(pady=(5, 0))
+        main_key_combo = ttk.Combobox(dlg, state="readonly")
+        main_key_combo.pack(fill="x", padx=15, pady=5)
+
+
+        ttk.Label(dlg, text="Lookup File:", style="TLabel").pack(pady=(15, 0))
+        lookup_file_combo = ttk.Combobox(dlg, values=file_names, state="readonly")
+        lookup_file_combo.pack(fill="x", padx=15, pady=5)
+
+        if len(self.files) > 1:
+            l_default = 1 if main_file_combo.current() == 0 else 0
+            lookup_file_combo.current(l_default)
+        else:
+            lookup_file_combo.current(0)
+
+        ttk.Label(dlg, text="Lookup Sheet:", style="TLabel").pack(pady=(5, 0))
+        lookup_sheet_combo = ttk.Combobox(dlg, state="readonly")
+        lookup_sheet_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Key Column (Lookup):", style="TLabel").pack(pady=(5, 0))
+        lookup_key_combo = ttk.Combobox(dlg, state="readonly")
+        lookup_key_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Columns to Fetch (Lookup):", style="TLabel").pack(pady=(5, 0))
+        lookup_cols_list = tk.Listbox(
+            dlg, selectmode="multiple", height=6,
+            bg="#232946", fg="#eebbc3", selectbackground="#b8c1ec", selectforeground="#232946"
+        )
+        lookup_cols_list.pack(fill="x", padx=15, pady=5)
+
+
+        unique_var = tk.BooleanVar()
+        tk.Checkbutton(
+            dlg, text="Show Only Unique Differences (A vs B)", variable=unique_var,
+            bg="#232946", fg="#eebbc3", selectcolor="#232946", activebackground="#232946"
+        ).pack(pady=8)
+
+        def update_main_sheets(_e=None):
+            fp = self.files[main_file_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            main_sheet_combo['values'] = sheets
+
+            if self.current_preview_file == fp and self.current_preview_sheet in sheets:
+                main_sheet_combo.set(self.current_preview_sheet)
+            else:
+                main_sheet_combo.current(0)
+            update_main_cols()
+
+        def update_main_cols(_e=None):
+            fp = self.files[main_file_combo.current()]
+            sh = main_sheet_combo.get()
+            df = self.all_sheets[fp][sh]
+            main_key_combo['values'] = list(df.columns)
+            if df.columns.size:
+                main_key_combo.current(0)
+
+        def update_lookup_sheets(_e=None):
+            fp = self.files[lookup_file_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            lookup_sheet_combo['values'] = sheets
+            lookup_sheet_combo.current(0)
+            update_lookup_cols()
+
+        def update_lookup_cols(_e=None):
+            fp = self.files[lookup_file_combo.current()]
+            sh = lookup_sheet_combo.get()
+            df = self.all_sheets[fp][sh]
+            cols = list(df.columns)
+            lookup_key_combo['values'] = cols
+            if cols:
+                lookup_key_combo.current(0)
+            lookup_cols_list.delete(0, tk.END)
+            for c in cols:
+                lookup_cols_list.insert(tk.END, c)
+
+        main_file_combo.bind("<<ComboboxSelected>>", update_main_sheets)
+        main_sheet_combo.bind("<<ComboboxSelected>>", update_main_cols)
+        lookup_file_combo.bind("<<ComboboxSelected>>", update_lookup_sheets)
+        lookup_sheet_combo.bind("<<ComboboxSelected>>", update_lookup_cols)
+
+        update_main_sheets()
+        update_lookup_sheets()
+
+        def perform_vlookup():
+            try:
+
+                fp_main = self.files[main_file_combo.current()]
+                fp_lookup = self.files[lookup_file_combo.current()]
+                sh_main = main_sheet_combo.get()
+                sh_lookup = lookup_sheet_combo.get()
+                key_main = main_key_combo.get()
+                key_lookup = lookup_key_combo.get()
+                sel_idx = lookup_cols_list.curselection()
+                fetch_cols = [lookup_cols_list.get(i) for i in sel_idx]
+
+                if not key_main or not key_lookup:
+                    messagebox.showwarning("Warning", "Select key columns.")
+                    return
+
+                df_main = self.all_sheets[fp_main][sh_main]
+                df_lookup = self.all_sheets[fp_lookup][sh_lookup]
+
+                if unique_var.get():
+
+                    set_main = set(df_main[key_main].dropna().astype(str))
+                    set_lookup = set(df_lookup[key_lookup].dropna().astype(str))
+                    only_in_main = sorted(set_main - set_lookup)
+                    only_in_lookup = sorted(set_lookup - set_main)
+                    out_df = pd.DataFrame({
+                        f"Only in {os.path.basename(fp_main)}::{sh_main}": pd.Series(only_in_main),
+                        f"Only in {os.path.basename(fp_lookup)}::{sh_lookup}": pd.Series(only_in_lookup)
+                    })
+                else:
+
+                    if not fetch_cols:
+
+                        fetch_cols = [c for c in df_lookup.columns if c != key_lookup]
+
+                    cols = [key_lookup] + [c for c in fetch_cols if c != key_lookup]
+                    out_df = pd.merge(
+                        df_main,
+                        df_lookup[cols],
+                        left_on=key_main,
+                        right_on=key_lookup,
+                        how="left",
+                        suffixes=('', '_lk')
+                    )
+
+                    if key_main != key_lookup and key_lookup in out_df.columns:
+                        out_df.drop(columns=[key_lookup], inplace=True)
+
+                self.result_df = out_df
+                self.current_preview_df = out_df
+                self._update_preview_tree(out_df)
+                self.set_status("VLOOKUP complete.")
+                dlg.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"VLOOKUP failed:\n{e}")
+
+        ttk.Button(dlg, text="Run VLOOKUP", command=perform_vlookup).pack(pady=15)
+
+
+    def compare_columns(self):
+        if len(self.files) < 2:
+            messagebox.showwarning("Warning", "Load at least two files.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Compare Columns")
+        dlg.geometry("520x420")
+        dlg.configure(bg="#232946")
+
+        fnames = [os.path.basename(p) for p in self.files]
+
+        # A
+        ttk.Label(dlg, text="Sheet A - File:", style="TLabel").pack(pady=(10, 0))
+        file_a_combo = ttk.Combobox(dlg, values=fnames, state="readonly")
+        file_a_combo.pack(fill="x", padx=15, pady=5)
+        file_a_combo.current(0)
+
+        ttk.Label(dlg, text="Sheet A - Sheet:", style="TLabel").pack()
+        sheet_a_combo = ttk.Combobox(dlg, state="readonly")
+        sheet_a_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Sheet A - Column:", style="TLabel").pack()
+        col_a_combo = ttk.Combobox(dlg, state="readonly")
+        col_a_combo.pack(fill="x", padx=15, pady=5)
+
+        # B
+        ttk.Label(dlg, text="Sheet B - File:", style="TLabel").pack(pady=(15, 0))
+        file_b_combo = ttk.Combobox(dlg, values=fnames, state="readonly")
+        file_b_combo.pack(fill="x", padx=15, pady=5)
+        file_b_combo.current(1 if len(self.files) > 1 else 0)
+
+        ttk.Label(dlg, text="Sheet B - Sheet:", style="TLabel").pack()
+        sheet_b_combo = ttk.Combobox(dlg, state="readonly")
+        sheet_b_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Sheet B - Column:", style="TLabel").pack()
+        col_b_combo = ttk.Combobox(dlg, state="readonly")
+        col_b_combo.pack(fill="x", padx=15, pady=5)
+
+        def upd_a(_e=None):
+            fp = self.files[file_a_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            sheet_a_combo['values'] = sheets
+            sheet_a_combo.current(0)
+            upd_a_cols()
+
+        def upd_a_cols(_e=None):
+            fp = self.files[file_a_combo.current()]
+            sh = sheet_a_combo.get()
+            df = self.all_sheets[fp][sh]
+            col_a_combo['values'] = list(df.columns)
+            if df.columns.size:
+                col_a_combo.current(0)
+
+        def upd_b(_e=None):
+            fp = self.files[file_b_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            sheet_b_combo['values'] = sheets
+            sheet_b_combo.current(0)
+            upd_b_cols()
+
+        def upd_b_cols(_e=None):
+            fp = self.files[file_b_combo.current()]
+            sh = sheet_b_combo.get()
+            df = self.all_sheets[fp][sh]
+            col_b_combo['values'] = list(df.columns)
+            if df.columns.size:
+                col_b_combo.current(0)
+
+        file_a_combo.bind("<<ComboboxSelected>>", upd_a)
+        sheet_a_combo.bind("<<ComboboxSelected>>", upd_a_cols)
+        file_b_combo.bind("<<ComboboxSelected>>", upd_b)
+        sheet_b_combo.bind("<<ComboboxSelected>>", upd_b_cols)
+
+        upd_a(); upd_b()
+
+        def run_compare():
+            try:
+                fp_a = self.files[file_a_combo.current()]
+                sh_a = sheet_a_combo.get()
+                col_a = col_a_combo.get()
+                fp_b = self.files[file_b_combo.current()]
+                sh_b = sheet_b_combo.get()
+                col_b = col_b_combo.get()
+
+                df_a = self.all_sheets[fp_a][sh_a]
+                df_b = self.all_sheets[fp_b][sh_b]
+
+                set_a = set(df_a[col_a].dropna().astype(str))
+                set_b = set(df_b[col_b].dropna().astype(str))
+
+                only_a = sorted(set_a - set_b)
+                only_b = sorted(set_b - set_a)
+
+                out_df = pd.DataFrame({
+                    f"Only in {os.path.basename(fp_a)}::{sh_a}": pd.Series(only_a),
+                    f"Only in {os.path.basename(fp_b)}::{sh_b}": pd.Series(only_b)
+                })
+                self.result_df = out_df
+                self.current_preview_df = out_df
+                self._update_preview_tree(out_df)
+                self.set_status("Column comparison complete.")
+                dlg.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Comparison failed:\n{e}")
+
+        ttk.Button(dlg, text="Compare", command=run_compare).pack(pady=15)
+
+    def find_unique_values(self):
+        if not self.files:
+            messagebox.showwarning("Warning", "Load files first.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Find Unique Values")
+        dlg.geometry("420x300")
+        dlg.configure(bg="#232946")
+
+        fnames = [os.path.basename(p) for p in self.files]
+
+        ttk.Label(dlg, text="File:", style="TLabel").pack(pady=(10, 0))
+        file_combo = ttk.Combobox(dlg, values=fnames, state="readonly")
+        file_combo.pack(fill="x", padx=15, pady=5)
+        file_combo.current(0)
+
+        ttk.Label(dlg, text="Sheet:", style="TLabel").pack()
+        sheet_combo = ttk.Combobox(dlg, state="readonly")
+        sheet_combo.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Column:", style="TLabel").pack()
+        col_combo = ttk.Combobox(dlg, state="readonly")
+        col_combo.pack(fill="x", padx=15, pady=5)
+
+        def upd_s(_e=None):
+            fp = self.files[file_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            sheet_combo['values'] = sheets
+            sheet_combo.current(0)
+            upd_c()
+
+        def upd_c(_e=None):
+            fp = self.files[file_combo.current()]
+            sh = sheet_combo.get()
+            df = self.all_sheets[fp][sh]
+            cols = list(df.columns)
+            col_combo['values'] = cols
+            if cols:
+                col_combo.current(0)
+
+        file_combo.bind("<<ComboboxSelected>>", upd_s)
+        sheet_combo.bind("<<ComboboxSelected>>", upd_c)
+
+        upd_s()
+
+        def run_unique():
+            try:
+                fp = self.files[file_combo.current()]
+                sh = sheet_combo.get()
+                col = col_combo.get()
+                df = self.all_sheets[fp][sh]
+                uniq = pd.DataFrame(df[col].dropna().astype(str).unique(), columns=[f"Unique_{col}"])
+                self.result_df = uniq
+                self.current_preview_df = uniq
+                self._update_preview_tree(uniq)
+                self.set_status(f"Found {len(uniq)} unique value(s).")
+                dlg.destroy()
+            except Exception as e:
+                messagebox.showerror("Error", f"Unique extraction failed:\n{e}")
+
+        ttk.Button(dlg, text="Find Unique", command=run_unique).pack(pady=15)
+
+    def concat_columns(self):
+        if not self.files:
+            messagebox.showwarning("Warning", "Load files first.")
+            return
+        self._concat_dialog()
+
+    def _concat_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Concatenate Columns")
+        dlg.geometry("500x500")
+        dlg.configure(bg="#232946")
+
+        fnames = [os.path.basename(p) for p in self.files]
+
+        ttk.Label(dlg, text="File:", style="TLabel").pack(pady=(10, 0))
+        file_combo = ttk.Combobox(dlg, values=fnames, state="readonly")
+        file_combo.pack(fill="x", padx=15, pady=5)
+        if self.current_preview_file:
+            file_combo.current(self.files.index(self.current_preview_file))
+        else:
+            file_combo.current(0)
+
+        ttk.Label(dlg, text="Sheet:", style="TLabel").pack()
+        sheet_combo = ttk.Combobox(dlg, state="readonly")
+        sheet_combo.pack(fill="x", padx=15, pady=5)
+
+        cols_list = tk.Listbox(
+            dlg, selectmode="multiple", height=8,
+            bg="#232946", fg="#eebbc3", selectbackground="#b8c1ec", selectforeground="#232946"
+        )
+        cols_list.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Separator:", style="TLabel").pack(pady=(10, 0))
+        sep_entry = ttk.Entry(dlg)
+        sep_entry.insert(0, " ")
+        sep_entry.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Prefix:", style="TLabel").pack(pady=(5, 0))
+        pre_entry = ttk.Entry(dlg)
+        pre_entry.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Suffix:", style="TLabel").pack(pady=(5, 0))
+        suf_entry = ttk.Entry(dlg)
+        suf_entry.pack(fill="x", padx=15, pady=5)
+
+        ttk.Label(dlg, text="Result Column Name:", style="TLabel").pack(pady=(5, 0))
+        res_entry = ttk.Entry(dlg)
+        res_entry.insert(0, "Concatenated")
+        res_entry.pack(fill="x", padx=15, pady=5)
+
+        def upd_sh(_e=None):
+            fp = self.files[file_combo.current()]
+            sheets = list(self.all_sheets[fp].keys())
+            sheet_combo['values'] = sheets
+            if self.current_preview_file == fp and self.current_preview_sheet in sheets:
+                sheet_combo.set(self.current_preview_sheet)
+            else:
+                sheet_combo.current(0)
+            upd_cols()
+
+        def upd_cols(_e=None):
+            fp = self.files[file_combo.current()]
+            sh = sheet_combo.get()
+            df = self.all_sheets[fp][sh]
+            cols_list.delete(0, tk.END)
+            for c in df.columns:
+                cols_list.insert(tk.END, c)
+
+        file_combo.bind("<<ComboboxSelected>>", upd_sh)
+        sheet_combo.bind("<<ComboboxSelected>>", upd_cols)
+
+        upd_sh()
+
+        def preview_concat():
+            sel_idx = cols_list.curselection()
+            if len(sel_idx) < 2:
+                messagebox.showwarning("Warning", "Select at least two columns.")
+                return
+            cols = [cols_list.get(i) for i in sel_idx]
+            fp = self.files[file_combo.current()]
+            sh = sheet_combo.get()
+            df = self.all_sheets[fp][sh]
+            sep = sep_entry.get()
+            pre = pre_entry.get()
+            suf = suf_entry.get()
+            res = res_entry.get().strip() or "Concatenated"
+            try:
+                preview_df = df.copy()
+                preview_df[res] = pre + df[cols].fillna("").astype(str).agg(sep.join, axis=1) + suf
+            except Exception as e:
+                messagebox.showerror("Error", f"Preview failed:\n{e}")
+                return
+            self._show_concat_preview_window(preview_df, fp, sh, cols, sep, pre, suf, res)
+
+        ttk.Button(dlg, text="Preview Result (Full Screen)", command=preview_concat).pack(pady=15)
+
+    def _show_concat_preview_window(self, preview_df, fp, sh, cols, sep, pre, suf, res_name):
+        win = tk.Toplevel(self.root)
+        win.title("Concatenation Preview")
         try:
-            webbrowser.open_new(docs_url)
-        except:
-            messagebox.showinfo("Documentation", "Online documentation: " + docs_url)
+            win.state('zoomed')
+        except Exception:
+            win.geometry("1200x700")
 
-    def create_widgets(self):
-        # Main container with scroll
-        main_container = ttk.Frame(self.root)
-        main_container.pack(fill="both", expand=True)
-        
-        # Canvas and scrollbars
-        canvas = tk.Canvas(main_container, bg="#232946", highlightthickness=0)
-        scroll_y = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
-        scroll_x = ttk.Scrollbar(main_container, orient="horizontal", command=canvas.xview)
-        canvas.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        
-        scroll_y.pack(side="right", fill="y")
-        scroll_x.pack(side="bottom", fill="x")
-        canvas.pack(side="left", fill="both", expand=True)
-        
-        # Frame inside canvas
-        self.main_frame = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=self.main_frame, anchor="nw")
-        
-        # Bind scroll events
-        self.main_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        lbl = ttk.Label(win, text=f"Preview: {os.path.basename(fp)} / {sh} → {res_name}", style="TLabel")
+        lbl.pack(pady=5)
 
-        # Header
-        header_frame = ttk.Frame(self.main_frame, style="TFrame")
-        header_frame.pack(fill="x", padx=20, pady=(15, 5))
-        
-        if self.logo:
-            logo_label = ttk.Label(header_frame, image=self.logo, style="TLabel")
-            logo_label.pack(side="left", padx=(0, 15))
-        
-        title_frame = ttk.Frame(header_frame, style="TFrame")
-        title_frame.pack(side="left", fill="y")
-        
-        title_label = ttk.Label(title_frame, text="Excel Multi-Sheet Tool", 
-                              font=("Segoe UI", 20, "bold"), style="TLabel")
-        title_label.pack(anchor="w")
-        
-        subtitle_label = ttk.Label(title_frame, text="Compare, merge and analyze Excel sheets", 
-                                 font=("Segoe UI", 12), style="TLabel")
-        subtitle_label.pack(anchor="w")
-        
-        # Quick action buttons
-        quick_btn_frame = ttk.Frame(header_frame, style="TFrame")
-        quick_btn_frame.pack(side="right", padx=10)
-        
-        ttk.Button(quick_btn_frame, text="New", command=self.clear_files, 
-                 style="TButton", width=8).pack(side="left", padx=5)
-        ttk.Button(quick_btn_frame, text="Open", command=self.load_files, 
-                 style="TButton", width=8).pack(side="left", padx=5)
-        ttk.Button(quick_btn_frame, text="Save As", command=self.export_result, 
-                 style="TButton", width=8).pack(side="left", padx=5)
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # File selection
-        file_frame = ttk.Labelframe(self.main_frame, text="Step 1: Select Excel Files", padding=15)
-        file_frame.pack(fill="x", padx=20, pady=10)
-        
-        btn_frame = ttk.Frame(file_frame, style="TFrame")
-        btn_frame.pack(side="left", fill="y", padx=(0, 15))
-        
-        ttk.Button(btn_frame, text="Add Files", command=self.load_files, 
-                 style="TButton").pack(fill="x", pady=3)
-        ttk.Button(btn_frame, text="Clear All", command=self.clear_files, 
-                 style="TButton").pack(fill="x", pady=3)
-        
-        self.file_listbox = tk.Listbox(file_frame, height=4, bg="#232946", fg="#eebbc3", 
-                                     font=("Segoe UI", 11), selectbackground="#b8c1ec", 
-                                     selectforeground="#232946", highlightthickness=0)
-        self.file_listbox.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        scroll = ttk.Scrollbar(file_frame, orient="vertical", command=self.file_listbox.yview)
-        scroll.pack(side="right", fill="y")
-        self.file_listbox.config(yscrollcommand=scroll.set)
-
-        # Sheet and column selection
-        select_frame = ttk.Frame(self.main_frame, style="TFrame")
-        select_frame.pack(fill="x", padx=20, pady=10)
-        
-        # Sheet selection
-        sheet_frame = ttk.Labelframe(select_frame, text="Step 2: Select Sheet", padding=15)
-        sheet_frame.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        ttk.Label(sheet_frame, text="Sheet Name:", style="TLabel").pack(anchor="w")
-        self.sheet_combo = ttk.Combobox(sheet_frame, state="readonly", font=("Segoe UI", 11))
-        self.sheet_combo.pack(fill="x", pady=5)
-        ttk.Button(sheet_frame, text="Load Sheet Data", command=self.load_sheet, 
-                 style="TButton").pack(fill="x", pady=5)
-
-        # Column selection
-        col_frame = ttk.Labelframe(select_frame, text="Step 3: Select Columns", padding=15)
-        col_frame.pack(side="left", fill="x", expand=True)
-        
-        ttk.Label(col_frame, text="Available Columns:", style="TLabel").pack(anchor="w")
-        
-        col_select_frame = ttk.Frame(col_frame, style="TFrame")
-        col_select_frame.pack(fill="both", expand=True)
-        
-        self.col_listbox = tk.Listbox(col_select_frame, selectmode=tk.MULTIPLE, height=6, 
-                                    bg="#232946", fg="#eebbc3", font=("Segoe UI", 11), 
-                                    selectbackground="#b8c1ec", selectforeground="#232946")
-        self.col_listbox.pack(side="left", fill="both", expand=True)
-        
-        col_scroll = ttk.Scrollbar(col_select_frame, orient="vertical", command=self.col_listbox.yview)
-        col_scroll.pack(side="right", fill="y")
-        self.col_listbox.config(yscrollcommand=col_scroll.set)
-
-        # Operations
-        op_frame = ttk.Labelframe(self.main_frame, text="Step 4: Select Operation", padding=15)
-        op_frame.pack(fill="x", padx=20, pady=10)
-        
-        btn_grid = ttk.Frame(op_frame, style="TFrame")
-        btn_grid.pack(fill="x")
-        
-        ttk.Button(btn_grid, text="Concatenate Columns", command=self.concat_columns, 
-                 style="TButton").grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-        ttk.Button(btn_grid, text="Find Unique Rows", command=self.find_unique, 
-                 style="TButton").grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(btn_grid, text="VLOOKUP", command=self.vlookup, 
-                 style="TButton").grid(row=0, column=2, padx=5, pady=5, sticky="ew")
-        ttk.Button(btn_grid, text="Merge Sheets", command=self.merge_sheets, 
-                 style="TButton").grid(row=0, column=3, padx=5, pady=5, sticky="ew")
-        
-        btn_grid.columnconfigure(0, weight=1)
-        btn_grid.columnconfigure(1, weight=1)
-        btn_grid.columnconfigure(2, weight=1)
-        btn_grid.columnconfigure(3, weight=1)
-
-        # Preview area with Google Sheets-like UI
-        preview_frame = ttk.Labelframe(self.main_frame, text="Step 5: Preview Results", padding=5)
-        preview_frame.pack(fill="both", expand=True, padx=20, pady=(10, 15))
-        
-        # Toolbar for preview
-        preview_toolbar = ttk.Frame(preview_frame, style="TFrame")
-        preview_toolbar.pack(fill="x", padx=5, pady=5)
-        
-        ttk.Button(preview_toolbar, text="Refresh", command=self.refresh_preview, 
-                 style="TButton", width=10).pack(side="left", padx=2)
-        ttk.Button(preview_toolbar, text="Full Screen", command=self.show_full_preview, 
-                 style="TButton", width=12).pack(side="left", padx=2)
-        ttk.Button(preview_toolbar, text="Download", command=self.download_result, 
-                 style="TButton", width=10).pack(side="right", padx=2)
-        
-        # Preview grid
-        self.preview_container = ttk.Frame(preview_frame, style="Preview.TFrame")
-        self.preview_container.pack(fill="both", expand=True, padx=5, pady=(0, 5))
-        
-        # Create treeview with Google Sheets-like appearance
-        self.create_preview_grid()
-
-        # Progress bar (hidden by default)
-        self.progress = ttk.Progressbar(self.main_frame, orient="horizontal", 
-                                      mode="indeterminate", length=300)
-        self.progress.pack(fill="x", padx=20, pady=5)
-        self.progress.pack_forget()
-
-    def create_preview_grid(self):
-        # Clear existing widgets
-        for widget in self.preview_container.winfo_children():
-            widget.destroy()
-        
-        # Create scrollable canvas
-        canvas = tk.Canvas(self.preview_container, bg="white", highlightthickness=0)
-        hscroll = ttk.Scrollbar(self.preview_container, orient="horizontal", command=canvas.xview)
-        vscroll = ttk.Scrollbar(self.preview_container, orient="vertical", command=canvas.yview)
-        canvas.configure(xscrollcommand=hscroll.set, yscrollcommand=vscroll.set)
-        
-        # Grid layout for scrollbars
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vscroll.grid(row=0, column=1, sticky="ns")
-        hscroll.grid(row=1, column=0, sticky="ew")
-        
-        self.preview_container.grid_rowconfigure(0, weight=1)
-        self.preview_container.grid_columnconfigure(0, weight=1)
-        
-        # Frame inside canvas for content
-        self.grid_frame = ttk.Frame(canvas, style="Preview.TFrame")
-        canvas.create_window((0, 0), window=self.grid_frame, anchor="nw")
-        
-        # Bind configuration
-        self.grid_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        
-        # Mouse wheel scrolling
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", 
-            lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units")))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-        
-        # Initial empty grid
-        self.update_preview_grid(pd.DataFrame())
-
-    def update_preview_grid(self, df):
-        # Clear existing grid
-        for widget in self.grid_frame.winfo_children():
-            widget.destroy()
-        
-        if df.empty:
-            # Show empty state
-            empty_label = ttk.Label(self.grid_frame, text="No data to preview. Load or process data first.", 
-                                  style="Preview.TLabel", font=("Arial", 12))
-            empty_label.pack(pady=50)
-            return
-        
-        # Limit preview to first 100 rows and 20 columns for performance
-        preview_df = df.head(100).iloc[:, :20]
-        rows, cols = preview_df.shape
-        
-        # Create header row
-        for j, col in enumerate(preview_df.columns):
-            header = ttk.Label(self.grid_frame, text=str(col), style="Preview.TLabel", 
-                             relief="solid", borderwidth=1, padding=(8,4), 
-                             font=("Arial", 10, "bold"), background="#f0f0f0")
-            header.grid(row=0, column=j, sticky="nsew")
-        
-        # Create data cells
-        for i, row in preview_df.iterrows():
-            for j, val in enumerate(row):
-                cell = ttk.Label(self.grid_frame, text=str(val), style="Preview.TLabel", 
-                               relief="solid", borderwidth=1, padding=(8,4))
-                cell.grid(row=i+1, column=j, sticky="nsew")
-        
-        # Configure grid weights
-        for i in range(rows+1):
-            self.grid_frame.grid_rowconfigure(i, weight=1)
-        for j in range(cols):
-            self.grid_frame.grid_columnconfigure(j, weight=1)
-
-    def refresh_preview(self):
-        if self.current_preview_df is not None:
-            self.update_preview_grid(self.current_preview_df)
-            self.set_status("Preview refreshed")
-
-    def show_full_preview(self):
-        if self.result_df is None:
-            messagebox.showwarning("Warning", "No data to preview")
-            return
-        
-        top = tk.Toplevel(self.root)
-        top.title("Full Preview - ABG Excel Tool")
-        top.geometry("1200x800")
-        top.configure(bg="#232946")
-        
-        # Create a frame for the preview
-        preview_frame = ttk.Frame(top, style="TFrame")
-        preview_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        # Create a treeview widget for full preview
-        tree = ttk.Treeview(preview_frame, show="headings", selectmode="extended")
-        tree.pack(fill="both", expand=True, side="left")
-        
-        # Add scrollbars
-        vsb = ttk.Scrollbar(preview_frame, orient="vertical", command=tree.yview)
-        vsb.pack(fill="y", side="right")
-        hsb = ttk.Scrollbar(top, orient="horizontal", command=tree.xview)
-        hsb.pack(fill="x", side="bottom")
-        
+        tree = ttk.Treeview(frame, show="headings")
+        tree.pack(side="left", fill="both", expand=True)
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
+        hsb.pack(fill="x")
         tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        
-        # Set up columns
-        tree["columns"] = list(self.result_df.columns)
-        for col in self.result_df.columns:
-            tree.heading(col, text=col)
-            tree.column(col, width=120, anchor="w")
-        
-        # Add data (limit to 1000 rows for performance)
-        for i, row in self.result_df.head(1000).iterrows():
+
+        tree["columns"] = list(preview_df.columns)
+        for c in preview_df.columns:
+            tree.heading(c, text=c)
+            tree.column(c, width=150, anchor="w")
+
+        for _, row in preview_df.head(1000).iterrows():
             tree.insert("", "end", values=list(row))
-        
-        # Add a download button
-        btn_frame = ttk.Frame(top, style="TFrame")
-        btn_frame.pack(fill="x", padx=10, pady=(0, 10))
-        
-        ttk.Button(btn_frame, text="Download Full Data", command=lambda: self.download_result(self.result_df), 
-                 style="TButton").pack(side="right", padx=5)
+
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill="x", pady=10, padx=10)
+
+        def apply_concat():
+            df = self.all_sheets[fp][sh].copy()
+            try:
+                df[res_name] = pre + df[cols].fillna("").astype(str).agg(sep.join, axis=1) + suf
+            except Exception as e:
+                messagebox.showerror("Error", f"Apply failed:\n{e}")
+                return
+            # Persist
+            self.all_sheets[fp][sh] = df
+            if self.current_preview_file == fp and self.current_preview_sheet == sh:
+                self.current_preview_df = df
+                self.result_df = df
+                self._update_preview_tree(df)
+            self.set_status(f"Concatenated → {res_name}")
+            messagebox.showinfo("Success", f"Column '{res_name}' added.")
+            win.destroy()
+
+        def download_concat():
+            path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv")],
+                title="Save Concatenated Result As"
+            )
+            if not path:
+                return
+            try:
+                if path.lower().endswith(".csv"):
+                    preview_df.to_csv(path, index=False)
+                else:
+                    preview_df.to_excel(path, index=False)
+                messagebox.showinfo("Saved", f"File saved:\n{path}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Save failed:\n{e}")
+
+        ttk.Button(btn_frame, text="Apply to Sheet", command=apply_concat).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Download Excel", command=download_concat).pack(side="right", padx=5)
+
+    def full_preview(self):
+        df = self.result_df if self.result_df is not None else self.current_preview_df
+        if df is None:
+            messagebox.showwarning("Warning", "Nothing to preview.")
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Full Preview")
+        try:
+            win.state('zoomed')
+        except Exception:
+            win.geometry("1200x700")
+
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        tree = ttk.Treeview(frame, show="headings")
+        tree.pack(side="left", fill="both", expand=True)
+
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        vsb.pack(side="right", fill="y")
+        hsb = ttk.Scrollbar(win, orient="horizontal", command=tree.xview)
+        hsb.pack(fill="x")
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree["columns"] = list(df.columns)
+        for c in df.columns:
+            tree.heading(c, text=c)
+            tree.column(c, width=150, anchor="w")
+
+        for _, row in df.iterrows():
+            tree.insert("", "end", values=list(row))
+
+        ttk.Button(win, text="Download", command=self.export_result).pack(pady=8)
+
+
+    def export_result(self):
+        df = self.result_df if self.result_df is not None else self.current_preview_df
+        if df is None:
+            messagebox.showwarning("Warning", "No result data to export.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("CSV files", "*.csv")],
+            title="Save Result As"
+        )
+        if not path:
+            return
+
+        try:
+            if path.lower().endswith(".csv"):
+                df.to_csv(path, index=False)
+            else:
+                df.to_excel(path, index=False)
+            messagebox.showinfo("Export Complete", f"File saved:\n{path}")
+            self.set_status(f"Exported to {path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed:\n{e}")
+
 
     def set_status(self, msg):
         self.status_var.set(msg)
         self.root.update_idletasks()
-
-    def run_with_progress(self, func, *args, **kwargs):
-        def wrapper():
-            self.progress.pack()
-            self.progress.start()
-            try:
-                func(*args, **kwargs)
-            finally:
-                self.progress.stop()
-                self.progress.pack_forget()
-        threading.Thread(target=wrapper).start()
-
-    def load_files(self):
-        files = filedialog.askopenfilenames(filetypes=[("Excel files", "*.xlsx *.xls *.xlsm")])
-        if files:
-            self.files = list(files)  # Overwrite existing files
-            self.file_listbox.delete(0, tk.END)
-            for f in files:
-                self.file_listbox.insert(tk.END, f)
-            self.set_status(f"{len(files)} file(s) loaded")
-            self.load_sheet_names()
-
-    def clear_files(self):
-        self.files = []
-        self.dfs = []
-        self.sheet_names = []
-        self.file_listbox.delete(0, tk.END)
-        self.sheet_combo['values'] = []
-        self.col_listbox.delete(0, tk.END)
-        self.result_df = None
-        self.current_preview_df = None
-        self.update_preview_grid(pd.DataFrame())
-        self.set_status("Cleared all files and data")
-
-    def load_sheet_names(self):
-        if not self.files:
-            return
-        
-        try:
-            xl = pd.ExcelFile(self.files[0])
-            self.sheet_names = xl.sheet_names
-            self.sheet_combo['values'] = self.sheet_names
-            if self.sheet_names:
-                self.sheet_combo.current(0)
-            self.set_status(f"Loaded {len(self.sheet_names)} sheets from first file")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read sheets: {str(e)}")
-            self.set_status("Error loading sheets")
-
-    def load_sheet(self):
-        if not self.files or not self.sheet_combo.get():
-            messagebox.showwarning("Warning", "Please select files and a sheet first")
-            return
-        
-        self.set_status("Loading sheet data...")
-        self.run_with_progress(self._load_sheet)
-
-    def _load_sheet(self):
-        self.dfs = []
-        for f in self.files:
-            try:
-                df = pd.read_excel(f, sheet_name=self.sheet_combo.get())
-                self.dfs.append(df)
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to load sheet from {f}:\n{str(e)}")
-                self.set_status("Error loading sheet")
-                return
-        
-        # Update column listbox
-        self.col_listbox.delete(0, tk.END)
-        for col in self.dfs[0].columns:
-            self.col_listbox.insert(tk.END, col)
-        
-        # Show preview of first file's data
-        self.current_preview_df = self.dfs[0]
-        self.update_preview_grid(self.current_preview_df)
-        self.set_status(f"Loaded sheet '{self.sheet_combo.get()}' from {len(self.files)} files")
-
-    def concat_columns(self):
-        indices = self.col_listbox.curselection()
-        if not indices:
-            messagebox.showwarning("Warning", "Please select columns to concatenate")
-            return
-        
-        col_names = [self.col_listbox.get(i) for i in indices]
-        for i, df in enumerate(self.dfs):
-            self.dfs[i]['Concatenated'] = df[col_names].astype(str).agg(' '.join, axis=1)
-        
-        self.result_df = pd.concat(self.dfs, ignore_index=True)
-        self.current_preview_df = self.result_df
-        self.update_preview_grid(self.result_df)
-        
-        messagebox.showinfo("Success", f"Concatenated {len(col_names)} columns and merged {len(self.dfs)} sheets")
-        self.set_status(f"Concatenated columns: {', '.join(col_names)}")
-
-    def find_unique(self):
-        if len(self.dfs) < 2:
-            messagebox.showwarning("Warning", "You need at least 2 files to find unique rows")
-            return
-        
-        # Create dialog to select comparison columns
-        select_win = tk.Toplevel(self.root)
-        select_win.title("Select Columns for Comparison")
-        select_win.geometry("400x300")
-        select_win.configure(bg="#232946")
-        
-        ttk.Label(select_win, text="Select column from first file:", style="TLabel").pack(pady=(20,5))
-        col1_combo = ttk.Combobox(select_win, values=list(self.dfs[0].columns), state="readonly")
-        col1_combo.pack(pady=5, padx=20, fill="x")
-        col1_combo.current(0)
-        
-        ttk.Label(select_win, text="Select column from second file:", style="TLabel").pack(pady=(20,5))
-        col2_combo = ttk.Combobox(select_win, values=list(self.dfs[1].columns), state="readonly")
-        col2_combo.pack(pady=5, padx=20, fill="x")
-        col2_combo.current(0)
-        
-        def perform_comparison():
-            col1 = col1_combo.get()
-            col2 = col2_combo.get()
-            
-            if not col1 or not col2:
-                messagebox.showwarning("Warning", "Please select columns from both files")
-                return
-            
-            try:
-                # Get unique values from each file
-                set1 = set(self.dfs[0][col1].dropna().astype(str))
-                set2 = set(self.dfs[1][col2].dropna().astype(str))
-                
-                # Find unique to each set
-                unique_to_1 = self.dfs[0][~self.dfs[0][col1].astype(str).isin(set2)]
-                unique_to_2 = self.dfs[1][~self.dfs[1][col2].astype(str).isin(set1)]
-                
-                # Combine results with source markers
-                unique_to_1['_Source'] = f"Only in {self.files[0]}"
-                unique_to_2['_Source'] = f"Only in {self.files[1]}"
-                
-                self.result_df = pd.concat([unique_to_1, unique_to_2], ignore_index=True)
-                self.current_preview_df = self.result_df
-                self.update_preview_grid(self.result_df)
-                
-                select_win.destroy()
-                messagebox.showinfo("Success", f"Found {len(unique_to_1)} unique rows in first file and {len(unique_to_2)} in second file")
-                self.set_status("Unique rows comparison completed")
-            except Exception as e:
-                messagebox.showerror("Error", f"Comparison failed: {str(e)}")
-                self.set_status("Error in comparison")
-        
-        ttk.Button(select_win, text="Find Unique Rows", command=perform_comparison, 
-                 style="TButton").pack(pady=20)
-
-    def vlookup(self):
-        indices = self.col_listbox.curselection()
-        if len(self.dfs) < 2 or not indices:
-            messagebox.showwarning("Warning", "You need at least 2 files and select a key column for VLOOKUP")
-            return
-        
-        key_col = self.col_listbox.get(indices[0])
-        
-        try:
-            # Perform merge (VLOOKUP)
-            result = pd.merge(self.dfs[0], self.dfs[1], on=key_col, how='left', 
-                            suffixes=('_file1', '_file2'))
-            
-            self.result_df = result
-            self.current_preview_df = self.result_df
-            self.update_preview_grid(self.result_df)
-            
-            messagebox.showinfo("Success", f"VLOOKUP completed on column '{key_col}'")
-            self.set_status(f"VLOOKUP completed on {key_col}")
-        except Exception as e:
-            messagebox.showerror("Error", f"VLOOKUP failed: {str(e)}")
-            self.set_status("VLOOKUP failed")
-
-    def merge_sheets(self):
-        if len(self.dfs) < 2:
-            messagebox.showwarning("Warning", "You need at least 2 files to merge")
-            return
-        
-        try:
-            # Simple concatenation - could be enhanced with more options
-            self.result_df = pd.concat(self.dfs, ignore_index=True)
-            self.current_preview_df = self.result_df
-            self.update_preview_grid(self.result_df)
-            
-            messagebox.showinfo("Success", f"Merged {len(self.dfs)} sheets with {len(self.result_df)} total rows")
-            self.set_status(f"Merged {len(self.dfs)} sheets")
-        except Exception as e:
-            messagebox.showerror("Error", f"Merge failed: {str(e)}")
-            self.set_status("Merge failed")
-
-    def export_result(self):
-        if self.result_df is None:
-            messagebox.showwarning("Warning", "No result data to export")
-            return
-        
-        file = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003", "*.xls"), ("CSV", "*.csv")],
-            title="Save Result As"
-        )
-        
-        if not file:
-            return
-        
-        try:
-            if file.endswith('.csv'):
-                self.result_df.to_csv(file, index=False)
-            else:
-                self.result_df.to_excel(file, index=False)
-            
-            messagebox.showinfo("Success", f"Data successfully exported to:\n{file}")
-            self.set_status(f"Exported to {file}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Export failed: {str(e)}")
-            self.set_status("Export failed")
-
-    def download_result(self, df=None):
-        if df is None:
-            if self.result_df is None:
-                messagebox.showwarning("Warning", "No result data to download")
-                return
-            df = self.result_df
-        
-        file = filedialog.asksaveasfilename(
-            defaultextension=".xlsx",
-            filetypes=[("Excel Workbook", "*.xlsx"), ("Excel 97-2003", "*.xls")],
-            title="Download Excel File"
-        )
-        
-        if not file:
-            return
-        
-        try:
-            df.to_excel(file, index=False)
-            messagebox.showinfo("Download Complete", f"Excel file successfully downloaded to:\n{file}")
-            self.set_status(f"Downloaded to {file}")
-        except Exception as e:
-            messagebox.showerror("Download Failed", f"Error saving file: {str(e)}")
-            self.set_status("Download failed")
 
 if __name__ == "__main__":
     root = tk.Tk()
